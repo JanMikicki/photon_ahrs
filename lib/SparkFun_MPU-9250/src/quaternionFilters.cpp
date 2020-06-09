@@ -32,7 +32,7 @@ static float GyroMeasDrift = PI * (0.0f  / 180.0f);
 // the faster the solution converges, usually at the expense of accuracy.
 // In any case, this is the free parameter in the Madgwick filtering and
 // fusion scheme.
-static float beta = 0.8 * sqrt(3.0f / 4.0f) * GyroMeasError;   // Compute  // I added 0.8 coeff
+static float beta = sqrt(3.0f / 4.0f) * GyroMeasError;   // Compute  // I added 0.8 coeff
 //static float beta = 0.041;
 // Compute zeta, the other free parameter in the Madgwick scheme usually
 // set to a small or zero value

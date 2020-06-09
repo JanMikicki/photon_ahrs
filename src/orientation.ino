@@ -48,8 +48,7 @@ Adafruit_PCD8544 display = Adafruit_PCD8544(9, 8, 7, 5, 6);
 // Pin definitions
 int intPin = 12;  // These can be changed, 2 and 3 are the Arduinos ext int pins
 int myLed  = 13;  // Set up pin 13 led for toggling
-char szInfo[100];
-char msg[100];
+char msg[50];
 
 
 MPU9250 myIMU;
@@ -69,16 +68,16 @@ void setup()
   pinMode(myLed, OUTPUT);
   digitalWrite(myLed, HIGH);
 
-    if(TCPcomms){
+  if(TCPcomms){
 
-    while(!client.connect(server, 8000))
-      {
-        Particle.publish("Trying to connect...");
-        Serial.println("Trying to coonnect...");
-        delay(1000);
-        // client.println("GET /search?q=unicorn HTTP/1.0");
-      }
+  while(!client.connect(server, 8000))
+    {
+      Particle.publish("Trying to connect...");
+      Serial.println("Trying to coonnect...");
+      delay(1000);
+      // client.println("GET /search?q=unicorn HTTP/1.0");
     }
+  }
 
   // Read the WHO_AM_I register, this is a good test of communication
   byte c = myIMU.readByte(MPU9250_ADDRESS, WHO_AM_I_MPU9250);
@@ -140,7 +139,7 @@ void setup()
   {
     Serial.print("Could not connect to MPU9250: 0x");
     Serial.println(c, HEX);
-    while(1) ; // Loop forever if communication doesn't happen
+    while(1){delay(1000);} ; // Loop forever if communication doesn't happen
   }
   
 }
@@ -171,6 +170,7 @@ void loop()
 
     myIMU.readMagData(myIMU.magCount);  // Read the x/y/z adc values
     myIMU.getMres();
+
     // User environmental x-axis correction in milliGauss, should be
     // automatically calculated
     myIMU.magbias[0] = +470.;
@@ -192,7 +192,7 @@ void loop()
                
     
     //Spark.publish("gpsloc", szInfo); //Publish Data
-    delay(10);
+    delay(5); //can thottle refresh rate here
 
   } // if (readByte(MPU9250_ADDRESS, INT_STATUS) & 0x01)
 
@@ -296,7 +296,7 @@ void loop()
 
     // Serial print and/or display at 0.5 s rate independent of data rates
     // update LCD once per half-second independent of read rate
-    if (myIMU.delt_t > 500)
+    if (myIMU.delt_t > 200)
     {
       if (TCPcomms){
         if (client.status())
