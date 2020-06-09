@@ -54,7 +54,7 @@ char msg[100];
 
 MPU9250 myIMU;
 TCPClient client;
-byte server[] = { 192, 168, 0, 104 };
+byte server[] = { 192, 168, 0, 106 };
 //#define HOST_NAME "posttestserver.com" // would this work instead of the line above?
 
 void setup()
@@ -192,7 +192,7 @@ void loop()
                
     
     //Spark.publish("gpsloc", szInfo); //Publish Data
-    delay(50);
+    delay(10);
 
   } // if (readByte(MPU9250_ADDRESS, INT_STATUS) & 0x01)
 
@@ -207,13 +207,13 @@ void loop()
   // along the x-axis just like in the LSM9DS0 sensor. This rotation can be
   // modified to allow any convenient orientation convention. This is ok by
   // aircraft orientation standards! Pass gyro rate as rad/s
-  MadgwickQuaternionUpdate(-1000*myIMU.ax, -1000*myIMU.az, -1000*myIMU.ay, -myIMU.gx*PI/180.0f, -myIMU.gz*PI/180.0f, -myIMU.gy*PI/180.0f, 
+  MadgwickQuaternionUpdate(myIMU.ax, myIMU.az, myIMU.ay, -myIMU.gx*DEG_TO_RAD, -myIMU.gz*DEG_TO_RAD, -myIMU.gy*DEG_TO_RAD, 
                            -myIMU.my,  myIMU.mz, -myIMU.mx, myIMU.deltat); 
 
   // swapping middle coordinates changes roll sign, but picth keeps being reverse of what i want (negative nose up)
   // MahonyQuaternionUpdate(myIMU.ax, myIMU.az, myIMU.ay, myIMU.gx*DEG_TO_RAD,
-     //                    myIMU.gz*DEG_TO_RAD, myIMU.gy*DEG_TO_RAD, myIMU.mz,
-       //                  myIMU.mx, myIMU.my, myIMU.deltat);
+  //                       myIMU.gz*DEG_TO_RAD, myIMU.gy*DEG_TO_RAD, myIMU.mz,
+  //                       myIMU.mx, myIMU.my, myIMU.deltat);
 
   if (!AHRS)
   {
@@ -255,12 +255,11 @@ void loop()
       }
 
       myIMU.count = millis();
-      //digitalWrite(myLed, !digitalRead(myLed));  // toggle led
+      
     } // if (myIMU.delt_t > 500)
   } // if (!AHRS)
   else
   {
-    // Serial print and/or display at 0.5 s rate independent of data rates
     myIMU.delt_t = millis() - myIMU.count;
 
 // Define output variables from updated quaternion---these are Tait-Bryan
@@ -295,7 +294,10 @@ void loop()
       myIMU.yaw   -= 6.1;
       myIMU.roll  *= RAD_TO_DEG;
 
-
+    // Serial print and/or display at 0.5 s rate independent of data rates
+    // update LCD once per half-second independent of read rate
+    if (myIMU.delt_t > 500)
+    {
       if (TCPcomms){
         if (client.status())
         {
@@ -312,11 +314,6 @@ void loop()
         }
       }
 
-
-
-    // update LCD once per half-second independent of read rate
-    if (myIMU.delt_t > 500)
-    {
       if(SerialDebug)
       {
         Serial.print("ax = "); Serial.print((int)1000*myIMU.ax);
@@ -341,11 +338,7 @@ void loop()
 
         Serial.print("deltat = "); Serial.println(myIMU.deltat);
         Serial.print("delt_t = "); Serial.println(myIMU.delt_t);
-      }
-  
-
-      if(SerialDebug)
-      {
+      
         Serial.print("Yaw, Pitch, Roll: ");
         Serial.print(myIMU.yaw, 2);
         Serial.print(", ");
@@ -374,30 +367,7 @@ void loop()
         //client.stop();
       }
       
-#ifdef LCD
-      display.clearDisplay();
 
-      display.setCursor(0, 0); display.print(" x   y   z  ");
-
-      display.setCursor(0,  8); display.print((int)(1000*myIMU.ax));
-      display.setCursor(24, 8); display.print((int)(1000*myIMU.ay));
-      display.setCursor(48, 8); display.print((int)(1000*myIMU.az));
-      display.setCursor(72, 8); display.print("mg");
-
-      display.setCursor(0,  16); display.print((int)(myIMU.gx));
-      display.setCursor(24, 16); display.print((int)(myIMU.gy));
-      display.setCursor(48, 16); display.print((int)(myIMU.gz));
-      display.setCursor(66, 16); display.print("o/s");
-
-      display.setCursor(0,  24); display.print((int)(myIMU.mx));
-      display.setCursor(24, 24); display.print((int)(myIMU.my));
-      display.setCursor(48, 24); display.print((int)(myIMU.mz));
-      display.setCursor(72, 24); display.print("mG");
-
-      display.setCursor(0,  32); display.print((int)(myIMU.yaw));
-      display.setCursor(24, 32); display.print((int)(myIMU.pitch));
-      display.setCursor(48, 32); display.print((int)(myIMU.roll));
-      display.setCursor(66, 32); display.print("ypr");
 
     // With these settings the filter is updating at a ~145 Hz rate using the
     // Madgwick scheme and >200 Hz using the Mahony scheme even though the
@@ -414,11 +384,10 @@ void loop()
     // produced by the on-board Digital Motion Processor of Invensense's MPU6050
     // 6 DoF and MPU9150 9DoF sensors. The 3.3 V 8 MHz Pro Mini is doing pretty
     // well!
-      display.setCursor(0, 40); display.print("rt: ");
-      display.print((float) myIMU.sumCount / myIMU.sum, 2);
-      display.print(" Hz");
-      display.display();
-#endif // LCD
+      // display.setCursor(0, 40); display.print("rt: ");
+      // display.print((float) myIMU.sumCount / myIMU.sum, 2);
+      // display.print(" Hz");
+      // display.display();
 
       myIMU.count = millis();
       myIMU.sumCount = 0;
