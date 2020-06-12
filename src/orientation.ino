@@ -193,6 +193,7 @@ void loop()
     
     //Spark.publish("gpsloc", szInfo); //Publish Data
     delay(5); //can thottle refresh rate here
+    myIMU.data_read_counter ++;
 
   } // if (readByte(MPU9250_ADDRESS, INT_STATUS) & 0x01)
 
@@ -260,7 +261,7 @@ void loop()
   } // if (!AHRS)
   else
   {
-    myIMU.delt_t = millis() - myIMU.count;
+    myIMU.delt_t = millis() - myIMU.count; // time since we displayed
 
 // Define output variables from updated quaternion---these are Tait-Bryan
 // angles, commonly used in aircraft orientation. In this coordinate system,
@@ -349,6 +350,10 @@ void loop()
         Serial.print("rate = ");
         Serial.print((float)myIMU.sumCount/myIMU.sum, 2);
         Serial.println(" Hz");
+        
+        Serial.print("new_data_rate = ");
+        Serial.print((float)myIMU.data_read_counter/myIMU.sum, 2);
+        Serial.println(" Hz");
       }
       
      
@@ -392,6 +397,7 @@ void loop()
       myIMU.count = millis();
       myIMU.sumCount = 0;
       myIMU.sum = 0;
+      myIMU.data_read_counter = 0;
     } // if (myIMU.delt_t > 500)
   } // if (AHRS)
 }
