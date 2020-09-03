@@ -42,7 +42,7 @@ Adafruit_PCD8544 display = Adafruit_PCD8544(9, 8, 7, 5, 6);
 
 #define AHRS true         // Set to false for basic data read
 #define SerialDebug true  // Set to true to get Serial output for debugging
-#define TCPcomms true
+#define TCPcomms false
 
 
 // Pin definitions
@@ -287,6 +287,7 @@ void loop()
       myIMU.roll  = atan2(2.0f * (*getQ() * *(getQ()+1) + *(getQ()+2) *
                     *(getQ()+3)), *getQ() * *getQ() - *(getQ()+1) * *(getQ()+1)
                     - *(getQ()+2) * *(getQ()+2) + *(getQ()+3) * *(getQ()+3));
+
       myIMU.pitch *= RAD_TO_DEG;
       myIMU.yaw   *= RAD_TO_DEG;
       // Declination of SparkFun Electronics (40°05'26.6"N 105°11'05.9"W) is
@@ -294,6 +295,13 @@ void loop()
       // - http://www.ngdc.noaa.gov/geomag-web/#declination
       myIMU.yaw   -= 6.1;
       myIMU.roll  *= RAD_TO_DEG;
+
+      // I don't know why did I have to put this here but seems to be working fine now:
+      // 0 roll is level, right wing down is negative (around 0.2deg dead zone should be fine)
+      if (myIMU.roll > 0)
+        myIMU.roll -= 180.0;
+      else
+        myIMU.roll += 180.0;
 
     // Serial print and/or display at 0.5 s rate independent of data rates
     // update LCD once per half-second independent of read rate
