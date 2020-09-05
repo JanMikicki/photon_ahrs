@@ -41,15 +41,36 @@ Adafruit_PCD8544 display = Adafruit_PCD8544(9, 8, 7, 5, 6);
 #endif // LCD
 
 #define AHRS true         // Set to false for basic data read
-#define SerialDebug true  // Set to true to get Serial output for debugging
+#define SerialDebug false  // Set to true to get Serial output for debugging
 #define TCPcomms false
 
 
 // Pin definitions
 int intPin = 12;  // These can be changed, 2 and 3 are the Arduinos ext int pins
-int myLed  = 13;  // Set up pin 13 led for toggling
+// PS. I think on photon pin 12 is A0?
+
+//int myLed  = 13;  // Set up pin 13 led for toggling
 char msg[50];
 
+#define FRONT_LEFT_PIN RX
+#define FRONT_RIGHT_PIN WKP
+#define REAR_LEFT_PIN A5
+#define REAR_RIGHT_PIN D3
+
+Servo front_left;
+Servo front_right;
+Servo rear_left;
+Servo rear_right;
+
+bool attitude_control_enabled = false;
+float P_pitch = 0.4f;
+float P_roll = 0.2f;
+float pitch_error = 0.0f;
+float roll_error = 0.0f;
+int pitch_control = 0;
+int roll_control = 0;
+int u_0 = 1100;
+int pitch_in_tenths = 0;
 
 MPU9250 myIMU;
 TCPClient client;
@@ -58,25 +79,39 @@ byte server[] = { 192, 168, 0, 106 };
 
 void setup()
 {
+
+  // Motor servos attachments
+  front_left.attach(FRONT_LEFT_PIN, 1000, 2000);
+  front_right.attach(FRONT_RIGHT_PIN, 1000, 2000);
+  rear_left.attach(REAR_LEFT_PIN, 1000, 2000);
+  rear_right.attach(REAR_RIGHT_PIN, 1000, 2000);
+
+  Particle.function("motor_commands", motor_commands);
+  Particle.function("pitch gain", pitch_gain);
+  Particle.function("roll gain", roll_gain);
+  Particle.variable("pitch_in_tenths", pitch_in_tenths);
+  Particle.variable("pitch_control", pitch_control);
+  
   Wire.begin();
   // TWBR = 12;  // 400 kbit/sec I2C speed
   Serial.begin(38400);
 
   // Set up the interrupt pin, its set as active high, push-pull
+  // Jan note: not sure about this intPin -- does it do anything?
   pinMode(intPin, INPUT);
   digitalWrite(intPin, LOW);
-  pinMode(myLed, OUTPUT);
-  digitalWrite(myLed, HIGH);
+  //pinMode(myLed, OUTPUT);
+  //digitalWrite(myLed, HIGH);
 
   if(TCPcomms){
 
-  while(!client.connect(server, 8000))
-    {
-      Particle.publish("Trying to connect...");
-      Serial.println("Trying to coonnect...");
-      delay(1000);
-      // client.println("GET /search?q=unicorn HTTP/1.0");
-    }
+    while(!client.connect(server, 8000))
+      {
+        Particle.publish("Trying to connect...");
+        Serial.println("Trying to coonnect...");
+        delay(1000);
+        // client.println("GET /search?q=unicorn HTTP/1.0");
+      }
   }
 
   // Read the WHO_AM_I register, this is a good test of communication
@@ -288,7 +323,7 @@ void loop()
                     *(getQ()+3)), *getQ() * *getQ() - *(getQ()+1) * *(getQ()+1)
                     - *(getQ()+2) * *(getQ()+2) + *(getQ()+3) * *(getQ()+3));
 
-      myIMU.pitch *= RAD_TO_DEG;
+      myIMU.pitch *= -RAD_TO_DEG;
       myIMU.yaw   *= RAD_TO_DEG;
       // Declination of SparkFun Electronics (40°05'26.6"N 105°11'05.9"W) is
       // 	8° 30' E  ± 0° 21' (or 8.5°) on 2016-07-19
@@ -298,10 +333,61 @@ void loop()
 
       // I don't know why did I have to put this here but seems to be working fine now:
       // 0 roll is level, right wing down is negative (around 0.2deg dead zone should be fine)
-      if (myIMU.roll > 0)
-        myIMU.roll -= 180.0;
-      else
-        myIMU.roll += 180.0;
+    if (myIMU.roll > 0)
+      myIMU.roll -= 180.0f;
+    else
+      myIMU.roll += 180.0f;
+
+    pitch_in_tenths = (int) myIMU.pitch * 10;
+
+    if(attitude_control_enabled){
+             
+      pitch_error = 0.0f - (myIMU.pitch + 0.2f); // weird offset
+      roll_error = 0.0f - myIMU.roll;
+
+      // Safety precaution
+      if(pitch_error > 20.0f || roll_error > 20.0f){ 
+        attitude_control_enabled = false;
+
+        front_left.writeMicroseconds(1000);
+        front_right.writeMicroseconds(1000);
+        rear_left.writeMicroseconds(1000);
+        rear_right.writeMicroseconds(1000);
+      }
+      else {
+        // Check if errors exceed dead zone and apply control
+        if (abs(pitch_error) > 0.15f){
+          // Scaling error into [-1, 1] range assuming [-45, 45] deg attitude range
+          // Result = ((Input - InputLow) / (InputHigh - InputLow))
+          //    * (OutputHigh - OutputLow) + OutputLow;
+          pitch_error = ((pitch_error + 45.0f) / (45.0f + 45.0f)) * (1.0f + 1.0f) - 1.0f;
+
+          // Apply P term and        
+          // Scale the pitch_control signal into [-1000, 1000]
+          pitch_control = (int) (((P_pitch * pitch_error + 1.f) / (1.f + 1.f)) * (1000.f + 1000.f) - 1000.f);
+
+        }
+        else
+          { pitch_control = 0; } 
+
+        if (abs(roll_error) > 0.15f){
+
+          roll_error = ((roll_error + 45.0f) / (45.0f + 45.0f)) * (1.0f + 1.0f) - 1.0f;
+          roll_control = (int) (((P_roll * roll_error + 1.f) / (1.f + 1.f)) * (1000.f + 1000.f) - 1000.f);
+
+        }
+        else{ roll_control = 0; }
+
+        // Add the pitch_control and roll_control values to steady state (u_0)
+        // and clip the final signal into [1000, 2000] (roughly)
+        front_left.writeMicroseconds(max(1080, min(u_0 + pitch_control - roll_control, 1500)));
+        front_right.writeMicroseconds(max(1080, min(u_0 + pitch_control + roll_control, 1500)));
+        rear_left.writeMicroseconds(max(1080, min(u_0 - pitch_control - roll_control, 1500)));
+        rear_right.writeMicroseconds(max(1080, min(u_0 - pitch_control + roll_control, 1500)));
+
+      }
+    }
+
 
     // Serial print and/or display at 0.5 s rate independent of data rates
     // update LCD once per half-second independent of read rate
@@ -408,4 +494,81 @@ void loop()
       myIMU.data_read_counter = 0;
     } // if (myIMU.delt_t > 500)
   } // if (AHRS)
+}
+
+
+int pitch_gain(String command) {
+
+    if(command.toFloat() <= 0.f || command.toFloat() > 1.f)
+      return -1;
+
+    P_pitch = command.toFloat();
+    return 1;
+}
+
+int roll_gain(String command) {
+
+    if(command.toFloat() <= 0.f || command.toFloat() > 1.f)
+      return -1;
+
+    P_roll = command.toFloat();
+    return 1;
+}
+
+int motor_commands(String command) {
+    /* Particle.functions always take a string as an argument and return an integer.
+    Since we can pass a string, it means that we can give the program commands on how the function should be used.
+    In this case, telling the function "on" will turn the LED on and telling it "off" will turn the LED off.
+    Then, the function returns a value to us to let us know what happened.
+    In this case, it will return 1 for the LEDs turning on, 0 for the LEDs turning off,
+    and -1 if we received a totally bogus command that didn't do anything to the LEDs.
+    */
+
+    if (command=="off") {
+        
+        attitude_control_enabled = false;
+
+        front_left.writeMicroseconds(1000);
+        front_right.writeMicroseconds(1000);
+        rear_left.writeMicroseconds(1000);
+        rear_right.writeMicroseconds(1000);
+        
+        return 1;
+    }
+    else if (command=="idle"){
+
+      // Set to (theoretical) 8% of power
+      front_left.writeMicroseconds(1080);
+      front_right.writeMicroseconds(1080);
+      rear_left.writeMicroseconds(1080);
+      rear_right.writeMicroseconds(1080);
+
+      return 1;
+    }
+    else if (command=="spin up"){
+      
+      for (int i = 1000; i <= u_0; i += 5) {
+        Serial.print("Pulse length = ");
+        Serial.println(i);
+        
+        front_left.writeMicroseconds(i);
+        front_right.writeMicroseconds(i);
+        rear_left.writeMicroseconds(i);
+        rear_right.writeMicroseconds(i);
+        
+        delay(200);
+      }
+      
+      return 1;
+    }
+    else if (command=="enable"){
+        attitude_control_enabled = true;
+        return 1;
+    }
+    else if (command=="disable"){
+        attitude_control_enabled = false;
+        return 1;
+    }
+    else
+      return -1;   
 }
