@@ -63,14 +63,38 @@ Servo rear_left;
 Servo rear_right;
 
 bool attitude_control_enabled = false;
-float P_pitch = 0.4f;
-float P_roll = 0.2f;
+
+float pitch_reference = 0.0f;
+float roll_reference = 0.0f;
+float throttle_reference = 0.0f; //not used anywhere yet
+
+float P_pitch = 0.41f; 
+float P_roll = 0.32f;
+float D_pitch = 0.0011f;
+float D_roll = 0.001f;
+
 float pitch_error = 0.0f;
+float pitch_error_derivative = 0.0f;
+float prev_pitch_error = 0.0f;
+
 float roll_error = 0.0f;
+float roll_error_derivative = 0.0f;
+float prev_roll_error = 0.0f;
+
+float PID_pitch = 0.0f;
+float PID_roll = 0.0f;
+
 int pitch_control = 0;
 int roll_control = 0;
-int u_0 = 1100;
+int u_0 = 1150; // like, 15% 
+
 int pitch_in_tenths = 0;
+int roll_in_tenths = 0;
+float pitch_trim = 0.f;
+float roll_trim = 0.f;
+
+unsigned long last_joystick_update = -200;
+int joystick_conn_count = 0;
 
 MPU9250 myIMU;
 TCPClient client;
@@ -87,10 +111,16 @@ void setup()
   rear_right.attach(REAR_RIGHT_PIN, 1000, 2000);
 
   Particle.function("motor_commands", motor_commands);
-  Particle.function("pitch gain", pitch_gain);
-  Particle.function("roll gain", roll_gain);
+  Particle.function("pitch gain", set_pitch_gain);
+  Particle.function("roll gain", set_roll_gain);
+  Particle.function("pitch trim", set_pitch_trim);
+  Particle.function("roll trim", set_roll_trim);
+  Particle.function("joystick", joystick_input);
   Particle.variable("pitch_in_tenths", pitch_in_tenths);
+  Particle.variable("roll_in_tenths", roll_in_tenths);
   Particle.variable("pitch_control", pitch_control);
+  Particle.variable("joycount", joystick_conn_count);
+  
   
   Wire.begin();
   // TWBR = 12;  // 400 kbit/sec I2C speed
@@ -227,7 +257,7 @@ void loop()
                
     
     //Spark.publish("gpsloc", szInfo); //Publish Data
-    delay(5); //can thottle refresh rate here
+    delay(2); //can thottle refresh rate here
     myIMU.data_read_counter ++;
 
   } // if (readByte(MPU9250_ADDRESS, INT_STATUS) & 0x01)
@@ -338,55 +368,82 @@ void loop()
     else
       myIMU.roll += 180.0f;
 
-    pitch_in_tenths = (int) myIMU.pitch * 10;
+    myIMU.pitch += pitch_trim;
+    myIMU.roll += roll_trim;
 
-    if(attitude_control_enabled){
-             
-      pitch_error = 0.0f - (myIMU.pitch + 0.2f); // weird offset
-      roll_error = 0.0f - myIMU.roll;
+    pitch_in_tenths = (int) (myIMU.pitch * 10);
+    roll_in_tenths = (int) (myIMU.roll * 10);
 
-      // Safety precaution
-      if(pitch_error > 20.0f || roll_error > 20.0f){ 
-        attitude_control_enabled = false;
+    // Safety precaution -- cut off engines at attitude outside <-25, 25> deg
+    if(myIMU.roll > 25.0f || myIMU.pitch > 25.0f){ 
+      attitude_control_enabled = false;
 
-        front_left.writeMicroseconds(1000);
-        front_right.writeMicroseconds(1000);
-        rear_left.writeMicroseconds(1000);
-        rear_right.writeMicroseconds(1000);
-      }
-      else {
-        // Check if errors exceed dead zone and apply control
-        if (abs(pitch_error) > 0.15f){
-          // Scaling error into [-1, 1] range assuming [-45, 45] deg attitude range
-          // Result = ((Input - InputLow) / (InputHigh - InputLow))
-          //    * (OutputHigh - OutputLow) + OutputLow;
-          pitch_error = ((pitch_error + 45.0f) / (45.0f + 45.0f)) * (1.0f + 1.0f) - 1.0f;
-
-          // Apply P term and        
-          // Scale the pitch_control signal into [-1000, 1000]
-          pitch_control = (int) (((P_pitch * pitch_error + 1.f) / (1.f + 1.f)) * (1000.f + 1000.f) - 1000.f);
-
-        }
-        else
-          { pitch_control = 0; } 
-
-        if (abs(roll_error) > 0.15f){
-
-          roll_error = ((roll_error + 45.0f) / (45.0f + 45.0f)) * (1.0f + 1.0f) - 1.0f;
-          roll_control = (int) (((P_roll * roll_error + 1.f) / (1.f + 1.f)) * (1000.f + 1000.f) - 1000.f);
-
-        }
-        else{ roll_control = 0; }
-
-        // Add the pitch_control and roll_control values to steady state (u_0)
-        // and clip the final signal into [1000, 2000] (roughly)
-        front_left.writeMicroseconds(max(1080, min(u_0 + pitch_control - roll_control, 1500)));
-        front_right.writeMicroseconds(max(1080, min(u_0 + pitch_control + roll_control, 1500)));
-        rear_left.writeMicroseconds(max(1080, min(u_0 - pitch_control - roll_control, 1500)));
-        rear_right.writeMicroseconds(max(1080, min(u_0 - pitch_control + roll_control, 1500)));
-
-      }
+      front_left.writeMicroseconds(1000);
+      front_right.writeMicroseconds(1000);
+      rear_left.writeMicroseconds(1000);
+      rear_right.writeMicroseconds(1000);
     }
+    
+    if(attitude_control_enabled){
+
+      // If we didn't receive joystick updates for some time (1s here)
+      // assume we lost signal and set controls to 0.
+      // (we expect joystick signal at ~500 ms intervals)
+      
+      if (millis() - last_joystick_update > 1000){
+          pitch_reference = 0.0f;
+          roll_reference = 0.0f;  
+      }
+
+      if (abs(pitch_reference) > 10.0f || abs(roll_reference > 10.0f)) {
+          pitch_reference = 0.0f;
+          roll_reference = 0.0f;  
+      }
+           
+      pitch_error = pitch_reference - myIMU.pitch; 
+      roll_error = roll_reference - myIMU.roll;
+            
+      pitch_error_derivative = (pitch_error - prev_pitch_error) / myIMU.deltat; 
+      roll_error_derivative = (roll_error - prev_roll_error) / myIMU.deltat;
+
+      prev_pitch_error = pitch_error;
+      prev_roll_error = roll_error;   
+    
+      // Check if errors exceed dead zone and apply control
+      if (abs(pitch_error) > 0.2f){
+        // Scaling error into [-1, 1] range assuming [-45, 45] deg attitude range
+        // Result = ((Input - InputLow) / (InputHigh - InputLow))
+        //    * (OutputHigh - OutputLow) + OutputLow;
+        pitch_error = ((pitch_error + 45.0f) / (45.0f + 45.0f)) * (1.0f + 1.0f) - 1.0f;
+
+        // Calculate PID output
+        PID_pitch = P_pitch * pitch_error + D_pitch * pitch_error_derivative;
+              
+        // Scale the final pitch_control signal into [-1000, 1000]
+        pitch_control = (int) (((PID_pitch + 1.f) / (1.f + 1.f)) * (1000.f + 1000.f) - 1000.f);
+
+      }
+      else
+        { pitch_control = 0; } 
+
+      if (abs(roll_error) > 0.2f){
+
+        roll_error = ((roll_error + 45.0f) / (45.0f + 45.0f)) * (1.0f + 1.0f) - 1.0f;
+        PID_roll = P_roll * roll_error + D_roll * roll_error_derivative;
+        roll_control = (int) (((PID_roll + 1.f) / (1.f + 1.f)) * (1000.f + 1000.f) - 1000.f);
+
+      }
+      else{ roll_control = 0; }
+
+      // Add the pitch_control and roll_control values to steady state (u_0)
+      // and clip the final signal into [1000, 2000] (roughly)
+      front_left.writeMicroseconds(max(1080, min(u_0 + pitch_control - roll_control, 1300)));
+      front_right.writeMicroseconds(max(1080, min(u_0 + pitch_control + roll_control, 1300)));
+      rear_left.writeMicroseconds(max(1080, min(u_0 - pitch_control - roll_control, 1300)));
+      rear_right.writeMicroseconds(max(1080, min(u_0 - pitch_control + roll_control, 1300)));      
+
+    }
+
 
 
     // Serial print and/or display at 0.5 s rate independent of data rates
@@ -497,23 +554,45 @@ void loop()
 }
 
 
-int pitch_gain(String command) {
+int set_pitch_gain(String command) {
 
-    if(command.toFloat() <= 0.f || command.toFloat() > 1.f)
+    if(command.toFloat() <= 0.f || command.toFloat() > 10.f)
       return -1;
 
     P_pitch = command.toFloat();
     return 1;
 }
 
-int roll_gain(String command) {
+int set_roll_gain(String command) {
 
-    if(command.toFloat() <= 0.f || command.toFloat() > 1.f)
+    if(command.toFloat() <= 0.f || command.toFloat() > 10.f)
       return -1;
 
     P_roll = command.toFloat();
     return 1;
 }
+
+int set_pitch_trim(String command) {
+
+    // If we set 0, conversion didn't work or we exceeded limits: set 0 trim
+    if(command.toFloat() == 0.f || abs(command.toFloat()) > 6.f)
+      { pitch_trim = 0.f;
+        return -1; }
+
+    pitch_trim = command.toFloat();
+    return 1;
+}
+
+int set_roll_trim(String command) {
+
+    if(command.toFloat() == 0.f || abs(command.toFloat()) > 6.f)
+      { roll_trim = 0.f;
+        return -1; }
+
+    roll_trim = command.toFloat();
+    return 1;
+}
+
 
 int motor_commands(String command) {
     /* Particle.functions always take a string as an argument and return an integer.
@@ -535,7 +614,7 @@ int motor_commands(String command) {
         
         return 1;
     }
-    else if (command=="idle"){
+    else if (command=="slow"){
 
       // Set to (theoretical) 8% of power
       front_left.writeMicroseconds(1080);
@@ -548,8 +627,8 @@ int motor_commands(String command) {
     else if (command=="spin up"){
       
       for (int i = 1000; i <= u_0; i += 5) {
-        Serial.print("Pulse length = ");
-        Serial.println(i);
+        //Serial.print("Pulse length = ");
+        //Serial.println(i);
         
         front_left.writeMicroseconds(i);
         front_right.writeMicroseconds(i);
@@ -571,4 +650,13 @@ int motor_commands(String command) {
     }
     else
       return -1;   
+}
+
+
+int joystick_input(String command) {
+
+    last_joystick_update = millis();
+    
+    return sscanf(command, "%f,%f,%f", &roll_reference, &pitch_reference ,&throttle_reference);
+    
 }
