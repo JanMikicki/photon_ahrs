@@ -40,10 +40,9 @@
 Adafruit_PCD8544 display = Adafruit_PCD8544(9, 8, 7, 5, 6);
 #endif // LCD
 
-#define AHRS true         // Set to false for basic data read
+#define AHRS true          // Set to false for basic data read
 #define SerialDebug false  // Set to true to get Serial output for debugging
-#define TCPcomms false
-
+#define TCPcomms true      // Set to false if you don't want to steer
 
 // Pin definitions
 int intPin = 12;  // These can be changed, 2 and 3 are the Arduinos ext int pins
@@ -66,12 +65,17 @@ bool attitude_control_enabled = false;
 
 float pitch_reference = 0.0f;
 float roll_reference = 0.0f;
+float yaw_reference = 0.0f;
 float throttle_reference = 0.0f; //not used anywhere yet
 
-float P_pitch = 0.41f; 
-float P_roll = 0.32f;
-float D_pitch = 0.0011f;
-float D_roll = 0.001f;
+float P_pitch =  4.0f; // 0.42f; 
+int P_pitch_int = (int) P_pitch; // just for looking up
+float P_roll =  P_pitch; // 0.33f;
+float P_yaw = 0.0f;
+
+float D_pitch = 0.0f; //0.0012f;
+float D_roll = 0.0f; //0.001f;
+float I_yaw = 0.02;
 
 float pitch_error = 0.0f;
 float pitch_error_derivative = 0.0f;
@@ -81,29 +85,33 @@ float roll_error = 0.0f;
 float roll_error_derivative = 0.0f;
 float prev_roll_error = 0.0f;
 
+float yaw_error = 0.0f;
+float yaw_i_mem = 0.0f;
+
 float PID_pitch = 0.0f;
 float PID_roll = 0.0f;
+float PID_yaw = 0.0f;
 
 int pitch_control = 0;
 int roll_control = 0;
-int u_0 = 1150; // like, 15% 
+int u_0 = 1150;        // like, 15% 
 
 int pitch_in_tenths = 0;
 int roll_in_tenths = 0;
 float pitch_trim = 0.f;
 float roll_trim = 0.f;
 
-unsigned long last_joystick_update = -200;
-int joystick_conn_count = 0;
+unsigned long last_joystick_update = 0;
 
 MPU9250 myIMU;
 TCPClient client;
-byte server[] = { 192, 168, 0, 106 };
+TCPServer server = TCPServer(8000);
+//byte server[] = { 192, 168, 0, 113 };
 //#define HOST_NAME "posttestserver.com" // would this work instead of the line above?
 
 void setup()
 {
-
+  
   // Motor servos attachments
   front_left.attach(FRONT_LEFT_PIN, 1000, 2000);
   front_right.attach(FRONT_RIGHT_PIN, 1000, 2000);
@@ -118,9 +126,7 @@ void setup()
   Particle.function("joystick", joystick_input);
   Particle.variable("pitch_in_tenths", pitch_in_tenths);
   Particle.variable("roll_in_tenths", roll_in_tenths);
-  Particle.variable("pitch_control", pitch_control);
-  Particle.variable("joycount", joystick_conn_count);
-  
+  Particle.variable("pitch_P", P_pitch_int);
   
   Wire.begin();
   // TWBR = 12;  // 400 kbit/sec I2C speed
@@ -135,13 +141,10 @@ void setup()
 
   if(TCPcomms){
 
-    while(!client.connect(server, 8000))
-      {
-        Particle.publish("Trying to connect...");
-        Serial.println("Trying to coonnect...");
-        delay(1000);
-        // client.println("GET /search?q=unicorn HTTP/1.0");
-      }
+    server.begin();   
+    Particle.publish(WiFi.localIP().toString());
+    delay(200);
+
   }
 
   // Read the WHO_AM_I register, this is a good test of communication
@@ -236,6 +239,7 @@ void loop()
     myIMU.readMagData(myIMU.magCount);  // Read the x/y/z adc values
     myIMU.getMres();
 
+    // THIS MAGBIAS CAN BE IMPROVED IN FUTURE, NOW IT'S KINDA DUMB AND RANDOM
     // User environmental x-axis correction in milliGauss, should be
     // automatically calculated
     myIMU.magbias[0] = +470.;
@@ -328,41 +332,41 @@ void loop()
   {
     myIMU.delt_t = millis() - myIMU.count; // time since we displayed
 
-// Define output variables from updated quaternion---these are Tait-Bryan
-// angles, commonly used in aircraft orientation. In this coordinate system,
-// the positive z-axis is down toward Earth. Yaw is the angle between Sensor
-// x-axis and Earth magnetic North (or true North if corrected for local
-// declination, looking down on the sensor positive yaw is counterclockwise.
-// Pitch is angle between sensor x-axis and Earth ground plane, toward the
-// Earth is positive, up toward the sky is negative. Roll is angle between
-// sensor y-axis and Earth ground plane, y-axis up is positive roll. These
-// arise from the definition of the homogeneous rotation matrix constructed
-// from quaternions. Tait-Bryan angles as well as Euler angles are
-// non-commutative; that is, the get the correct orientation the rotations
-// must be applied in the correct order which for this configuration is yaw,
-// pitch, and then roll.
-// For more see
-// http://en.wikipedia.org/wiki/Conversion_between_quaternions_and_Euler_angles
-// which has additional links.
-      myIMU.yaw   = atan2(2.0f * (*(getQ()+1) * *(getQ()+2) + *getQ() *
-                    *(getQ()+3)), *getQ() * *getQ() + *(getQ()+1) * *(getQ()+1)
-                    - *(getQ()+2) * *(getQ()+2) - *(getQ()+3) * *(getQ()+3));
-      myIMU.pitch = -asin(2.0f * (*(getQ()+1) * *(getQ()+3) - *getQ() *
-                    *(getQ()+2)));
-      myIMU.roll  = atan2(2.0f * (*getQ() * *(getQ()+1) + *(getQ()+2) *
-                    *(getQ()+3)), *getQ() * *getQ() - *(getQ()+1) * *(getQ()+1)
-                    - *(getQ()+2) * *(getQ()+2) + *(getQ()+3) * *(getQ()+3));
+  // Define output variables from updated quaternion---these are Tait-Bryan
+  // angles, commonly used in aircraft orientation. In this coordinate system,
+  // the positive z-axis is down toward Earth. Yaw is the angle between Sensor
+  // x-axis and Earth magnetic North (or true North if corrected for local
+  // declination, looking down on the sensor positive yaw is counterclockwise.
+  // Pitch is angle between sensor x-axis and Earth ground plane, toward the
+  // Earth is positive, up toward the sky is negative. Roll is angle between
+  // sensor y-axis and Earth ground plane, y-axis up is positive roll. These
+  // arise from the definition of the homogeneous rotation matrix constructed
+  // from quaternions. Tait-Bryan angles as well as Euler angles are
+  // non-commutative; that is, the get the correct orientation the rotations
+  // must be applied in the correct order which for this configuration is yaw,
+  // pitch, and then roll.
+  // For more see
+  // http://en.wikipedia.org/wiki/Conversion_between_quaternions_and_Euler_angles
+  // which has additional links.
+    myIMU.yaw   = atan2(2.0f * (*(getQ()+1) * *(getQ()+2) + *getQ() *
+                  *(getQ()+3)), *getQ() * *getQ() + *(getQ()+1) * *(getQ()+1)
+                  - *(getQ()+2) * *(getQ()+2) - *(getQ()+3) * *(getQ()+3));
+    myIMU.pitch = -asin(2.0f * (*(getQ()+1) * *(getQ()+3) - *getQ() *
+                  *(getQ()+2)));
+    myIMU.roll  = atan2(2.0f * (*getQ() * *(getQ()+1) + *(getQ()+2) *
+                  *(getQ()+3)), *getQ() * *getQ() - *(getQ()+1) * *(getQ()+1)
+                  - *(getQ()+2) * *(getQ()+2) + *(getQ()+3) * *(getQ()+3));
 
-      myIMU.pitch *= -RAD_TO_DEG;
-      myIMU.yaw   *= RAD_TO_DEG;
-      // Declination of SparkFun Electronics (40°05'26.6"N 105°11'05.9"W) is
-      // 	8° 30' E  ± 0° 21' (or 8.5°) on 2016-07-19
-      // - http://www.ngdc.noaa.gov/geomag-web/#declination
-      myIMU.yaw   -= 6.1;
-      myIMU.roll  *= RAD_TO_DEG;
+    myIMU.pitch *= -RAD_TO_DEG;
+    myIMU.yaw   *= RAD_TO_DEG;
+    // Declination of SparkFun Electronics (40°05'26.6"N 105°11'05.9"W) is
+    // 	8° 30' E  ± 0° 21' (or 8.5°) on 2016-07-19
+    // - http://www.ngdc.noaa.gov/geomag-web/#declination
+    myIMU.yaw   -= 6.1;
+    myIMU.roll  *= RAD_TO_DEG;
 
-      // I don't know why did I have to put this here but seems to be working fine now:
-      // 0 roll is level, right wing down is negative (around 0.2deg dead zone should be fine)
+    // I don't know why did I have to put this here but seems to be working fine now:
+    // 0 roll is level, right wing down is negative (around 0.2deg dead zone should be fine)
     if (myIMU.roll > 0)
       myIMU.roll -= 180.0f;
     else
@@ -373,35 +377,35 @@ void loop()
 
     pitch_in_tenths = (int) (myIMU.pitch * 10);
     roll_in_tenths = (int) (myIMU.roll * 10);
+    P_pitch_int = (int) P_pitch;
 
-    // Safety precaution -- cut off engines at attitude outside <-25, 25> deg
-    if(myIMU.roll > 25.0f || myIMU.pitch > 25.0f){ 
+    // Safety precaution for now -- cut off the engines at attitude outside bracket
+    // This gets called on the first few loops usually
+    // because Madgwick needs to converge
+    if(abs(myIMU.roll) > 45.0f || abs(myIMU.pitch) > 45.0f){ 
       attitude_control_enabled = false;
 
       front_left.writeMicroseconds(1000);
       front_right.writeMicroseconds(1000);
       rear_left.writeMicroseconds(1000);
       rear_right.writeMicroseconds(1000);
+      
+      Serial.println("got into safety thing");
+      Particle.publish("got into safety thingy");
+      delay(1000);
     }
     
+    // Just a precaution on joystick input
+    if (abs(pitch_reference) > 20.0f || abs(roll_reference > 20.0f)) {
+        pitch_reference = 0.0f;
+        roll_reference = 0.0f;  
+    }   
+  
     if(attitude_control_enabled){
-
-      // If we didn't receive joystick updates for some time (1s here)
-      // assume we lost signal and set controls to 0.
-      // (we expect joystick signal at ~500 ms intervals)
-      
-      if (millis() - last_joystick_update > 1000){
-          pitch_reference = 0.0f;
-          roll_reference = 0.0f;  
-      }
-
-      if (abs(pitch_reference) > 10.0f || abs(roll_reference > 10.0f)) {
-          pitch_reference = 0.0f;
-          roll_reference = 0.0f;  
-      }
-           
+     
       pitch_error = pitch_reference - myIMU.pitch; 
       roll_error = roll_reference - myIMU.roll;
+      yaw_error = yaw_reference - myIMU.yaw;
             
       pitch_error_derivative = (pitch_error - prev_pitch_error) / myIMU.deltat; 
       roll_error_derivative = (roll_error - prev_roll_error) / myIMU.deltat;
@@ -410,58 +414,98 @@ void loop()
       prev_roll_error = roll_error;   
     
       // Check if errors exceed dead zone and apply control
-      if (abs(pitch_error) > 0.2f){
+      if (abs(pitch_error) > 0.01f){
         // Scaling error into [-1, 1] range assuming [-45, 45] deg attitude range
         // Result = ((Input - InputLow) / (InputHigh - InputLow))
         //    * (OutputHigh - OutputLow) + OutputLow;
-        pitch_error = ((pitch_error + 45.0f) / (45.0f + 45.0f)) * (1.0f + 1.0f) - 1.0f;
+
+        //pitch_error = ((pitch_error + 45.0f) / (45.0f + 45.0f)) * (1.0f + 1.0f) - 1.0f;
 
         // Calculate PID output
         PID_pitch = P_pitch * pitch_error + D_pitch * pitch_error_derivative;
-              
+
+        pitch_control = (int) PID_pitch;
         // Scale the final pitch_control signal into [-1000, 1000]
-        pitch_control = (int) (((PID_pitch + 1.f) / (1.f + 1.f)) * (1000.f + 1000.f) - 1000.f);
+        //pitch_control = (int) (((PID_pitch + 1.f) / (1.f + 1.f)) * (1000.f + 1000.f) - 1000.f);
 
       }
       else
         { pitch_control = 0; } 
 
-      if (abs(roll_error) > 0.2f){
+      if (abs(roll_error) > 0.01f){
 
-        roll_error = ((roll_error + 45.0f) / (45.0f + 45.0f)) * (1.0f + 1.0f) - 1.0f;
+        //roll_error = ((roll_error + 45.0f) / (45.0f + 45.0f)) * (1.0f + 1.0f) - 1.0f;
         PID_roll = P_roll * roll_error + D_roll * roll_error_derivative;
-        roll_control = (int) (((PID_roll + 1.f) / (1.f + 1.f)) * (1000.f + 1000.f) - 1000.f);
+        roll_control = (int) PID_roll;
+        //roll_control = (int) (((PID_roll + 1.f) / (1.f + 1.f)) * (1000.f + 1000.f) - 1000.f);
 
       }
       else{ roll_control = 0; }
 
-      // Add the pitch_control and roll_control values to steady state (u_0)
-      // and clip the final signal into [1000, 2000] (roughly)
-      front_left.writeMicroseconds(max(1080, min(u_0 + pitch_control - roll_control, 1300)));
-      front_right.writeMicroseconds(max(1080, min(u_0 + pitch_control + roll_control, 1300)));
-      rear_left.writeMicroseconds(max(1080, min(u_0 - pitch_control - roll_control, 1300)));
-      rear_right.writeMicroseconds(max(1080, min(u_0 - pitch_control + roll_control, 1300)));      
+      yaw_i_mem += I_yaw * yaw_error;
+      // I honestly don't know if there are any good practices as to where should I add saturation.
+      // I add it at the very end but should every PID branch have one?
+      yaw_i_mem = max(-50, min(50, yaw_i_mem)); 
+
+      PID_yaw = P_yaw * yaw_error + yaw_i_mem;
+
+      // Add the pitch_control and roll_control values to steady state throttle (u_0)
+      // and clip the final signal into [1080, 1400] (cause I'm scared of these motors)
+      front_left.writeMicroseconds(max(1080, min(u_0 + pitch_control - roll_control - PID_yaw, 1400)));
+      front_right.writeMicroseconds(max(1080, min(u_0 + pitch_control + roll_control + PID_yaw, 1400)));
+      rear_left.writeMicroseconds(max(1080, min(u_0 - pitch_control - roll_control + PID_yaw, 1400)));
+      rear_right.writeMicroseconds(max(1080, min(u_0 - pitch_control + roll_control - PID_yaw, 1400)));      
 
     }
 
 
-
     // Serial print and/or display at 0.5 s rate independent of data rates
     // update LCD once per half-second independent of read rate
-    if (myIMU.delt_t > 200)
+    if (myIMU.delt_t >= 25)
     {
-      if (TCPcomms){
-        if (client.status())
-        {
-          //int bytes = client.write(buf, len);  
-          //int err = client.getWriteError();
-          //if (err != 0) {
-            // Log.trace("TCPClient::write() failed (error = %d), number of bytes written: %d", err, bytes);
-          //}
+      if (TCPcomms && client.connected()){
+
+        // Check for 12 bytes (3 floats) from joystick input --
+        // if we have them, update roll, pitch and throttle references        
+        if(client.available() >= 12){
           
-          sprintf(msg, "%f, %f, %f", myIMU.roll, myIMU.pitch, myIMU.yaw);
-          Serial.print("bytes_written: ");
-          Serial.println(client.print(msg));
+          byte tempBuff[4];
+          float newInput[3];
+
+          for(int j = 0; j < 3; j++){
+            for(int i = 0; i < 4; i++)
+            {
+              tempBuff[i] = client.read();                     
+            }
+            newInput[j] = *((float*)(tempBuff));            
+          }
+          roll_reference = newInput[0];
+          pitch_reference = newInput[1];
+          throttle_reference = newInput[2];
+
+          // Serial.print("roll_reference: "); Serial.println(roll_reference, 3);
+          // Serial.print("pitch_reference: "); Serial.println(pitch_reference, 3);
+          // Serial.print("throttle_reference: "); Serial.println(throttle_reference, 3);
+          // Serial.print("Left in buffer: "); Serial.println(client.available());
+
+          last_joystick_update = millis();      
+
+        }
+        else{
+          
+          // Serial.println("No 12 bytes in TCP buffer.");
+          // Serial.print("Available: "); Serial.println(client.available());
+
+          if(millis() - last_joystick_update > 2000){
+            // Serial.print("Last joystick update: "); Serial.println(millis() - last_joystick_update);
+            // Serial.println("Suspected dead client. Closing connnection.");
+            pitch_reference = 0.0f;
+            roll_reference = 0.0f;
+            throttle_reference = 0.0f;
+            client.stop();
+            Particle.publish("Lost client");
+            delay(1000);          
+          }
           
         }
       }
@@ -508,19 +552,19 @@ void loop()
       }
       
      
-      // Check if still conected to server, try to reconnect
+      // Check if conected to client
       if (TCPcomms && !client.connected())
       {
-        Serial.println("Lost TCP connection.");
+        Serial.println("No TCP connection.");
 
-        while(!client.connect(server, 8000))
-        {
-          Particle.publish("Trying to reconnect...");
-          Serial.println("Trying to reconnect...");
-          delay(1000);
-          // client.println("GET /search?q=unicorn HTTP/1.0");
+        client = server.available();        
+
+        if(client.connected()){
+
+          Serial.print("Connected with client with address: ");
+          Serial.println(client.remoteIP().toString());         
+          last_joystick_update = millis();
         }
-        //client.stop();
       }
       
 
@@ -553,10 +597,16 @@ void loop()
   } // if (AHRS)
 }
 
+/*
+=================
+Below are some Particle specific functions. Most are called from a web console, 
+the last one (joystick_input) is called from python joystick script when buttons are pressed.
+=================
+*/
 
 int set_pitch_gain(String command) {
 
-    if(command.toFloat() <= 0.f || command.toFloat() > 10.f)
+    if(command.toFloat() <= 0.f || command.toFloat() > 20.f)
       return -1;
 
     P_pitch = command.toFloat();
@@ -565,7 +615,7 @@ int set_pitch_gain(String command) {
 
 int set_roll_gain(String command) {
 
-    if(command.toFloat() <= 0.f || command.toFloat() > 10.f)
+    if(command.toFloat() <= 0.f || command.toFloat() > 20.f)
       return -1;
 
     P_roll = command.toFloat();
@@ -635,7 +685,7 @@ int motor_commands(String command) {
         rear_left.writeMicroseconds(i);
         rear_right.writeMicroseconds(i);
         
-        delay(200);
+        delay(250);
       }
       
       return 1;
@@ -653,10 +703,48 @@ int motor_commands(String command) {
 }
 
 
+// This is for joystick buttons 
 int joystick_input(String command) {
 
-    last_joystick_update = millis();
+  if (command=="Trim down") {
+    pitch_trim += 5.f;
+  }
+  else if (command=="Trim up"){
+    pitch_trim -= 5.f;
+  }
+  else if (command=="Trim left"){
+    //roll_trim += 5.f;
+    P_pitch -= 1.0f;  
+  }
+  else if (command=="Trim right"){
+    //roll_trim -= 5.f;
+    P_pitch += 1.0f;
+  }
+  else if (command=="Power down"){
+    attitude_control_enabled = false;
+
+    front_left.writeMicroseconds(1000);
+    front_right.writeMicroseconds(1000);
+    rear_left.writeMicroseconds(1000);
+    rear_right.writeMicroseconds(1000);
     
-    return sscanf(command, "%f,%f,%f", &roll_reference, &pitch_reference ,&throttle_reference);
-    
+  }
+  else if (command=="Spin up"){
+    for (int i = 1000; i <= u_0; i += 5) {
+              
+      front_left.writeMicroseconds(i);
+      front_right.writeMicroseconds(i);
+      rear_left.writeMicroseconds(i);
+      rear_right.writeMicroseconds(i);
+      
+      delay(200);
+      last_joystick_update = millis(); // This is so that we don't disconnect on spin up
+    }
+  }
+  else if (command=="Enable control"){
+    yaw_reference = myIMU.yaw;
+    attitude_control_enabled = true;
+  }
+
+  return 1;
 }
