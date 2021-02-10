@@ -1,9 +1,8 @@
-/* MPU9250 Basic Example Code
- by: Kris Winer
- date: April 1, 2014
- license: Beerware - Use this code however you'd like. If you
- find it useful you can buy me a beer some time.
- Modified by Brent Wilkins July 19, 2016
+/* 
+ This is originally based on
+ MPU9250 Basic Example Code by Kris Winer and Brett Wilkins 
+ which had some boilerplate for 10DOF sensor communication and
+ Madgwick/Mahony algorithms. Original description:
 
  Demonstrate basic MPU-9250 functionality including parameterizing the register
  addresses, initializing the sensor, getting properly scaled accelerometer,
@@ -42,14 +41,13 @@ Adafruit_PCD8544 display = Adafruit_PCD8544(9, 8, 7, 5, 6);
 
 #define AHRS true          // Set to false for basic data read
 #define SerialDebug false  // Set to true to get Serial output for debugging
-#define TCPcomms true      // Set to false if you don't want to steer
+#define TCPcomms true      // Set to false if you don't want to steer over WiFi
 
 // Pin definitions
 int intPin = 12;  // These can be changed, 2 and 3 are the Arduinos ext int pins
-// PS. I think on photon pin 12 is A0?
+// PS. I think pin 12 on photon is A0?
 
 //int myLed  = 13;  // Set up pin 13 led for toggling
-char msg[50];
 
 #define FRONT_LEFT_PIN RX
 #define FRONT_RIGHT_PIN WKP
@@ -68,22 +66,27 @@ float roll_reference = 0.0f;
 float yaw_reference = 0.0f;
 float throttle_reference = 0.0f; //not used anywhere yet
 
-float P_pitch =  4.0f; // 0.42f; 
-int P_pitch_int = (int) P_pitch; // just for looking up
-float P_roll =  P_pitch; // 0.33f;
+float P_pitch =  7.0f;
+int P_pitch_int = (int) P_pitch; // just for manual montoring
+float P_roll =  P_pitch;
 float P_yaw = 0.0f;
 
-float D_pitch = 0.0f; //0.0012f;
-float D_roll = 0.0f; //0.001f;
-float I_yaw = 0.02;
+float D_pitch = 1.6f;
+float D_roll = D_pitch;
+
+float I_yaw = 0.000f;
+float I_pitch = 0.035f;
+float I_roll = I_pitch;
 
 float pitch_error = 0.0f;
 float pitch_error_derivative = 0.0f;
 float prev_pitch_error = 0.0f;
+float pitch_i_mem = 0.0f;
 
 float roll_error = 0.0f;
 float roll_error_derivative = 0.0f;
 float prev_roll_error = 0.0f;
+float roll_i_mem = 0.0f;
 
 float yaw_error = 0.0f;
 float yaw_i_mem = 0.0f;
@@ -214,6 +217,8 @@ void setup()
 
 void loop()
 {
+  delay(2); //can thottle refresh rate here
+
   // If intPin goes high, all data registers have new data
   // On interrupt, check if data ready interrupt
   if (myIMU.readByte(MPU9250_ADDRESS, INT_STATUS) & 0x01)
@@ -261,8 +266,6 @@ void loop()
                
     
     //Spark.publish("gpsloc", szInfo); //Publish Data
-    delay(2); //can thottle refresh rate here
-    myIMU.data_read_counter ++;
 
   } // if (readByte(MPU9250_ADDRESS, INT_STATUS) & 0x01)
 
@@ -362,7 +365,7 @@ void loop()
     // Declination of SparkFun Electronics (40°05'26.6"N 105°11'05.9"W) is
     // 	8° 30' E  ± 0° 21' (or 8.5°) on 2016-07-19
     // - http://www.ngdc.noaa.gov/geomag-web/#declination
-    myIMU.yaw   -= 6.1;
+    //myIMU.yaw   -= 6.1;
     myIMU.roll  *= RAD_TO_DEG;
 
     // I don't know why did I have to put this here but seems to be working fine now:
@@ -396,17 +399,20 @@ void loop()
     }
     
     // Just a precaution on joystick input
-    if (abs(pitch_reference) > 20.0f || abs(roll_reference > 20.0f)) {
-        pitch_reference = 0.0f;
-        roll_reference = 0.0f;  
-    }   
+    // if (abs(pitch_reference) > 20.0f || abs(roll_reference > 20.0f)) {
+    //     pitch_reference = 0.0f;
+    //     roll_reference = 0.0f;  
+    // }   
   
     if(attitude_control_enabled){
      
       pitch_error = pitch_reference - myIMU.pitch; 
       roll_error = roll_reference - myIMU.roll;
       yaw_error = yaw_reference - myIMU.yaw;
-            
+
+      pitch_i_mem += I_pitch * pitch_error;
+      roll_i_mem += I_roll * roll_error;
+
       pitch_error_derivative = (pitch_error - prev_pitch_error) / myIMU.deltat; 
       roll_error_derivative = (roll_error - prev_roll_error) / myIMU.deltat;
 
@@ -414,7 +420,7 @@ void loop()
       prev_roll_error = roll_error;   
     
       // Check if errors exceed dead zone and apply control
-      if (abs(pitch_error) > 0.01f){
+      //if (abs(pitch_error) > 0.01f){
         // Scaling error into [-1, 1] range assuming [-45, 45] deg attitude range
         // Result = ((Input - InputLow) / (InputHigh - InputLow))
         //    * (OutputHigh - OutputLow) + OutputLow;
@@ -422,46 +428,46 @@ void loop()
         //pitch_error = ((pitch_error + 45.0f) / (45.0f + 45.0f)) * (1.0f + 1.0f) - 1.0f;
 
         // Calculate PID output
-        PID_pitch = P_pitch * pitch_error + D_pitch * pitch_error_derivative;
+        PID_pitch = P_pitch * pitch_error + D_pitch * pitch_error_derivative + pitch_i_mem;
 
         pitch_control = (int) PID_pitch;
         // Scale the final pitch_control signal into [-1000, 1000]
         //pitch_control = (int) (((PID_pitch + 1.f) / (1.f + 1.f)) * (1000.f + 1000.f) - 1000.f);
 
-      }
-      else
-        { pitch_control = 0; } 
+      // }
+      // else
+      //   { pitch_control = 0; } 
 
-      if (abs(roll_error) > 0.01f){
+      //if (abs(roll_error) > 0.01f){
 
         //roll_error = ((roll_error + 45.0f) / (45.0f + 45.0f)) * (1.0f + 1.0f) - 1.0f;
-        PID_roll = P_roll * roll_error + D_roll * roll_error_derivative;
+        PID_roll = P_roll * roll_error + D_roll * roll_error_derivative + roll_i_mem;
         roll_control = (int) PID_roll;
         //roll_control = (int) (((PID_roll + 1.f) / (1.f + 1.f)) * (1000.f + 1000.f) - 1000.f);
 
-      }
-      else{ roll_control = 0; }
+      // }
+      // else{ roll_control = 0; }
 
       yaw_i_mem += I_yaw * yaw_error;
       // I honestly don't know if there are any good practices as to where should I add saturation.
       // I add it at the very end but should every PID branch have one?
+      // There is obviously one final clipping of control signal before sending it to the motor
       yaw_i_mem = max(-50, min(50, yaw_i_mem)); 
 
       PID_yaw = P_yaw * yaw_error + yaw_i_mem;
 
       // Add the pitch_control and roll_control values to steady state throttle (u_0)
       // and clip the final signal into [1080, 1400] (cause I'm scared of these motors)
-      front_left.writeMicroseconds(max(1080, min(u_0 + pitch_control - roll_control - PID_yaw, 1400)));
-      front_right.writeMicroseconds(max(1080, min(u_0 + pitch_control + roll_control + PID_yaw, 1400)));
-      rear_left.writeMicroseconds(max(1080, min(u_0 - pitch_control - roll_control + PID_yaw, 1400)));
-      rear_right.writeMicroseconds(max(1080, min(u_0 - pitch_control + roll_control - PID_yaw, 1400)));      
+      front_left.writeMicroseconds(max(1080, min(u_0 + pitch_control - roll_control - PID_yaw, 1800)));
+      front_right.writeMicroseconds(max(1080, min(u_0 + pitch_control + roll_control + PID_yaw, 1800)));
+      rear_left.writeMicroseconds(max(1080, min(u_0 - pitch_control - roll_control + PID_yaw, 1800)));
+      rear_right.writeMicroseconds(max(1080, min(u_0 - pitch_control + roll_control - PID_yaw, 1800)));      
 
     }
 
 
-    // Serial print and/or display at 0.5 s rate independent of data rates
-    // update LCD once per half-second independent of read rate
-    if (myIMU.delt_t >= 25)
+    // Read TCP input or Serial print something independently of data rates
+    if (myIMU.delt_t >= 15)
     {
       if (TCPcomms && client.connected()){
 
@@ -493,19 +499,26 @@ void loop()
         }
         else{
           
-          // Serial.println("No 12 bytes in TCP buffer.");
-          // Serial.print("Available: "); Serial.println(client.available());
+          /* 
+          This is a weak spot of the entire loop.
+          TCP delays can spike to over 3s when a packet gets retransmitted
+          (especially when checking something via particle funtion call or using the internet)
+          but in those 3 seconds the drone can easily crash...
+          I don't know what would be a good safety mechanism that won't disconnect often.
+          Is bluetooth more reliable in this regard? Radio?
+          */
 
-          if(millis() - last_joystick_update > 2000){
-            // Serial.print("Last joystick update: "); Serial.println(millis() - last_joystick_update);
-            // Serial.println("Suspected dead client. Closing connnection.");
-            pitch_reference = 0.0f;
-            roll_reference = 0.0f;
-            throttle_reference = 0.0f;
-            client.stop();
-            Particle.publish("Lost client");
-            delay(1000);          
-          }
+          // 3 seconds seemed like a good middle ground
+          // if(millis() - last_joystick_update > 5000){
+          //   // Serial.print("Last joystick update: "); Serial.println(millis() - last_joystick_update);
+          //   // Serial.println("Suspected dead client. Closing connnection.");
+          //   pitch_reference = 0.0f;
+          //   roll_reference = 0.0f;
+          //   throttle_reference = 0.0f;
+          //   client.stop();
+          //   Particle.publish("Lost client");
+          //   delay(1000);          
+          // }
           
         }
       }
@@ -546,13 +559,10 @@ void loop()
         Serial.print((float)myIMU.sumCount/myIMU.sum, 2);
         Serial.println(" Hz");
         
-        Serial.print("new_data_rate = ");
-        Serial.print((float)myIMU.data_read_counter/myIMU.sum, 2);
-        Serial.println(" Hz");
       }
       
      
-      // Check if conected to client
+      // Check clients are available if already not connected
       if (TCPcomms && !client.connected())
       {
         Serial.println("No TCP connection.");
@@ -584,30 +594,23 @@ void loop()
     // produced by the on-board Digital Motion Processor of Invensense's MPU6050
     // 6 DoF and MPU9150 9DoF sensors. The 3.3 V 8 MHz Pro Mini is doing pretty
     // well!
-      // display.setCursor(0, 40); display.print("rt: ");
-      // display.print((float) myIMU.sumCount / myIMU.sum, 2);
-      // display.print(" Hz");
-      // display.display();
 
       myIMU.count = millis();
       myIMU.sumCount = 0;
-      myIMU.sum = 0;
-      myIMU.data_read_counter = 0;
+      myIMU.sum = 0;      
     } // if (myIMU.delt_t > 500)
   } // if (AHRS)
 }
 
-/*
-=================
-Below are some Particle specific functions. Most are called from a web console, 
-the last one (joystick_input) is called from python joystick script when buttons are pressed.
-=================
-*/
+
+// =================
+// Below are some Particle specific functions. Most are called from a web console, 
+// the last one (joystick_input) is called from a python joystick script when buttons are pressed.
+// Particle functions always take a string as an argument and return an integer.
+// =================
+
 
 int set_pitch_gain(String command) {
-
-    if(command.toFloat() <= 0.f || command.toFloat() > 20.f)
-      return -1;
 
     P_pitch = command.toFloat();
     return 1;
@@ -615,19 +618,11 @@ int set_pitch_gain(String command) {
 
 int set_roll_gain(String command) {
 
-    if(command.toFloat() <= 0.f || command.toFloat() > 20.f)
-      return -1;
-
     P_roll = command.toFloat();
     return 1;
 }
 
 int set_pitch_trim(String command) {
-
-    // If we set 0, conversion didn't work or we exceeded limits: set 0 trim
-    if(command.toFloat() == 0.f || abs(command.toFloat()) > 6.f)
-      { pitch_trim = 0.f;
-        return -1; }
 
     pitch_trim = command.toFloat();
     return 1;
@@ -635,23 +630,11 @@ int set_pitch_trim(String command) {
 
 int set_roll_trim(String command) {
 
-    if(command.toFloat() == 0.f || abs(command.toFloat()) > 6.f)
-      { roll_trim = 0.f;
-        return -1; }
-
     roll_trim = command.toFloat();
     return 1;
 }
 
-
-int motor_commands(String command) {
-    /* Particle.functions always take a string as an argument and return an integer.
-    Since we can pass a string, it means that we can give the program commands on how the function should be used.
-    In this case, telling the function "on" will turn the LED on and telling it "off" will turn the LED off.
-    Then, the function returns a value to us to let us know what happened.
-    In this case, it will return 1 for the LEDs turning on, 0 for the LEDs turning off,
-    and -1 if we received a totally bogus command that didn't do anything to the LEDs.
-    */
+int motor_commands(String command) {   
 
     if (command=="off") {
         
@@ -666,7 +649,6 @@ int motor_commands(String command) {
     }
     else if (command=="slow"){
 
-      // Set to (theoretical) 8% of power
       front_left.writeMicroseconds(1080);
       front_right.writeMicroseconds(1080);
       rear_left.writeMicroseconds(1080);
@@ -677,9 +659,7 @@ int motor_commands(String command) {
     else if (command=="spin up"){
       
       for (int i = 1000; i <= u_0; i += 5) {
-        //Serial.print("Pulse length = ");
-        //Serial.println(i);
-        
+
         front_left.writeMicroseconds(i);
         front_right.writeMicroseconds(i);
         rear_left.writeMicroseconds(i);
@@ -707,18 +687,22 @@ int motor_commands(String command) {
 int joystick_input(String command) {
 
   if (command=="Trim down") {
-    pitch_trim += 5.f;
+    //pitch_trim += 5.f;
+    P_pitch += 0.25f;
+    P_roll = P_pitch;
   }
   else if (command=="Trim up"){
-    pitch_trim -= 5.f;
+    //pitch_trim -= 5.f;
+    P_pitch -= 0.25f;
+    P_roll = P_pitch;
   }
   else if (command=="Trim left"){
-    //roll_trim += 5.f;
-    P_pitch -= 1.0f;  
+    roll_trim += 5.f;
+    //P_pitch -= 1.0f;  
   }
   else if (command=="Trim right"){
-    //roll_trim -= 5.f;
-    P_pitch += 1.0f;
+    roll_trim -= 5.f;
+    //P_pitch += 1.0f;
   }
   else if (command=="Power down"){
     attitude_control_enabled = false;
@@ -738,13 +722,12 @@ int joystick_input(String command) {
       rear_right.writeMicroseconds(i);
       
       delay(200);
-      last_joystick_update = millis(); // This is so that we don't disconnect on spin up
+      last_joystick_update = millis();  // This is so that we won't disconnect on spin up
     }
   }
   else if (command=="Enable control"){
     yaw_reference = myIMU.yaw;
     attitude_control_enabled = true;
   }
-
   return 1;
 }

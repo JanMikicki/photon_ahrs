@@ -218,7 +218,6 @@ class MPU9250
     float deltat = 0.0f, sum = 0.0f;  // integration interval for both filter schemes
     uint32_t lastUpdate = 0, firstUpdate = 0; // used to calculate integration interval
     uint32_t Now = 0;        // used to calculate integration interval
-    uint32_t data_read_counter = 0; //check how often we actually read new data
     
     int16_t gyroCount[3];   // Stores the 16-bit signed gyro sensor output
     int16_t magCount[3];    // Stores the 16-bit signed magnetometer sensor output
