@@ -41,13 +41,13 @@ Adafruit_PCD8544 display = Adafruit_PCD8544(9, 8, 7, 5, 6);
 
 #define AHRS true          // Set to false for basic data read
 #define SerialDebug false  // Set to true to get Serial output for debugging
-#define TCPcomms true      // Set to false if you don't want to steer over WiFi
+#define TCPcomms false      // Set to false if you don't want to steer over WiFi
+#define UDPcomms true
 
 // Pin definitions
 int intPin = 12;  // These can be changed, 2 and 3 are the Arduinos ext int pins
+int ledPin = D7;
 // PS. I think pin 12 on photon is A0?
-
-//int myLed  = 13;  // Set up pin 13 led for toggling
 
 #define FRONT_LEFT_PIN RX
 #define FRONT_RIGHT_PIN WKP
@@ -66,17 +66,23 @@ float roll_reference = 0.0f;
 float yaw_reference = 0.0f;
 float throttle_reference = 0.0f; //not used anywhere yet
 
-float P_pitch =  7.0f;
-int P_pitch_int = (int) P_pitch; // just for manual montoring
-float P_roll =  P_pitch;
-float P_yaw = 0.0f;
+int max_pid_output = 400;
 
-float D_pitch = 1.6f;
+float P_pitch =  6.0f;
+float P_roll =  P_pitch;
+
+float D_pitch = 1.0f;
 float D_roll = D_pitch;
 
 float I_yaw = 0.000f;
-float I_pitch = 0.035f;
+float I_pitch = 0.010f;
 float I_roll = I_pitch;
+
+int P_pitch_int = (int) P_pitch; // just for manual montoring
+int D_pitch_int = (int) D_pitch; // just for manual montoring
+int I_pitch_int = (int) I_pitch; // just for manual montoring
+
+int converge_cnt = 0;            // helper counter to let IMU converge after spin-up
 
 float pitch_error = 0.0f;
 float pitch_error_derivative = 0.0f;
@@ -95,26 +101,29 @@ float PID_pitch = 0.0f;
 float PID_roll = 0.0f;
 float PID_yaw = 0.0f;
 
-int pitch_control = 0;
-int roll_control = 0;
-int u_0 = 1150;        // like, 15% 
-
-int pitch_in_tenths = 0;
-int roll_in_tenths = 0;
 float pitch_trim = 0.f;
 float roll_trim = 0.f;
 
+int pitch_control = 0;
+int roll_control = 0;
+int u_0 = 1150;        // 15% idle
+
+int pitch_in_tenths = 0;  // just for manual monitoring
+int roll_in_tenths = 0;   // just for manual monitoring
+
 unsigned long last_joystick_update = 0;
+unsigned long mytime = 0;
 
 MPU9250 myIMU;
 TCPClient client;
-TCPServer server = TCPServer(8000);
-//byte server[] = { 192, 168, 0, 113 };
-//#define HOST_NAME "posttestserver.com" // would this work instead of the line above?
+TCPServer server = TCPServer(12345);
+UDP Udp;
+
 
 void setup()
 {
-  
+  digitalWrite(ledPin, HIGH);   // signalize the beginning of setup
+
   // Motor servos attachments
   front_left.attach(FRONT_LEFT_PIN, 1000, 2000);
   front_right.attach(FRONT_RIGHT_PIN, 1000, 2000);
@@ -122,32 +131,42 @@ void setup()
   rear_right.attach(REAR_RIGHT_PIN, 1000, 2000);
 
   Particle.function("motor_commands", motor_commands);
-  Particle.function("pitch gain", set_pitch_gain);
-  Particle.function("roll gain", set_roll_gain);
+  Particle.function("P gain", set_P_gain);
+  Particle.function("D gain", set_D_gain);
+  Particle.function("I gain", set_I_gain);
   Particle.function("pitch trim", set_pitch_trim);
   Particle.function("roll trim", set_roll_trim);
   Particle.function("joystick", joystick_input);
   Particle.variable("pitch_in_tenths", pitch_in_tenths);
   Particle.variable("roll_in_tenths", roll_in_tenths);
-  Particle.variable("pitch_P", P_pitch_int);
+  Particle.variable("P_gain", P_pitch_int);
+  Particle.variable("I_gain", I_pitch_int);
+  Particle.variable("D_gain", D_pitch_int);
   
   Wire.begin();
   // TWBR = 12;  // 400 kbit/sec I2C speed
   Serial.begin(38400);
 
   // Set up the interrupt pin, its set as active high, push-pull
-  // Jan note: not sure about this intPin -- does it do anything?
+  // not sure about this intPin -- does it do anything? Find out.
+  pinMode(ledPin, OUTPUT);
   pinMode(intPin, INPUT);
   digitalWrite(intPin, LOW);
-  //pinMode(myLed, OUTPUT);
-  //digitalWrite(myLed, HIGH);
+  digitalWrite(ledPin, LOW);
+
 
   if(TCPcomms){
 
     server.begin();   
     Particle.publish(WiFi.localIP().toString());
     delay(200);
+  }
 
+  if(UDPcomms){
+
+    Udp.begin(8000);
+    Particle.publish(WiFi.localIP().toString());
+    delay(200);
   }
 
   // Read the WHO_AM_I register, this is a good test of communication
@@ -212,12 +231,13 @@ void setup()
     Serial.println(c, HEX);
     while(1){delay(1000);} ; // Loop forever if communication doesn't happen
   }
-  
+
+  digitalWrite(ledPin, LOW);  // signalize the end of setup
 }
 
 void loop()
 {
-  delay(2); //can thottle refresh rate here
+  //delay(1); //can thottle refresh rate here
 
   // If intPin goes high, all data registers have new data
   // On interrupt, check if data ready interrupt
@@ -280,10 +300,13 @@ void loop()
   // along the x-axis just like in the LSM9DS0 sensor. This rotation can be
   // modified to allow any convenient orientation convention. This is ok by
   // aircraft orientation standards! Pass gyro rate as rad/s
-  MadgwickQuaternionUpdate(myIMU.ax, myIMU.az, myIMU.ay, -myIMU.gx*DEG_TO_RAD, -myIMU.gz*DEG_TO_RAD, -myIMU.gy*DEG_TO_RAD, 
-                           -myIMU.my,  myIMU.mz, -myIMU.mx, myIMU.deltat); 
+  MadgwickQuaternionUpdate(myIMU.ax, myIMU.az, myIMU.ay, 
+                          -myIMU.gx*DEG_TO_RAD, -myIMU.gz*DEG_TO_RAD, -myIMU.gy*DEG_TO_RAD, 
+                          -myIMU.my,  myIMU.mz, -myIMU.mx, myIMU.deltat); 
 
-  // swapping middle coordinates changes roll sign, but picth keeps being reverse of what i want (negative nose up)
+  // About Madgwick: swapping middle coordinates changes roll sign, but pitch keeps being 
+  // reverse of what I want (negative nose up)
+
   // MahonyQuaternionUpdate(myIMU.ax, myIMU.az, myIMU.ay, myIMU.gx*DEG_TO_RAD,
   //                       myIMU.gz*DEG_TO_RAD, myIMU.gy*DEG_TO_RAD, myIMU.mz,
   //                       myIMU.mx, myIMU.my, myIMU.deltat);
@@ -333,7 +356,7 @@ void loop()
   } // if (!AHRS)
   else
   {
-    myIMU.delt_t = millis() - myIMU.count; // time since we displayed
+    myIMU.delt_t = millis() - myIMU.count; // time since TCP/UDP packet
 
   // Define output variables from updated quaternion---these are Tait-Bryan
   // angles, commonly used in aircraft orientation. In this coordinate system,
@@ -380,12 +403,24 @@ void loop()
 
     pitch_in_tenths = (int) (myIMU.pitch * 10);
     roll_in_tenths = (int) (myIMU.roll * 10);
-    P_pitch_int = (int) P_pitch;
 
-    // Safety precaution for now -- cut off the engines at attitude outside bracket
-    // This gets called on the first few loops usually
-    // because Madgwick needs to converge
-    if(abs(myIMU.roll) > 45.0f || abs(myIMU.pitch) > 45.0f){ 
+    P_pitch_int = (int) P_pitch;
+    I_pitch_int = (int) I_pitch;
+    D_pitch_int = (int) D_pitch;
+
+    // While the engines spin up, IMU readings go crazy for a while
+    // This counter lets it converge to actual predictions
+    // without triggering safety shut-down, or crazy motor action
+    if(converge_cnt > 0){
+      converge_cnt--;
+      if(converge_cnt == 0){
+        digitalWrite(ledPin, LOW);
+      }
+    }
+
+    // Safety precaution for now -- cut off the engines 
+    // at an attitude outside some bracket
+    if(converge_cnt == 0 && (abs(myIMU.roll) > 55.0f || abs(myIMU.pitch) > 55.0f)){ 
       attitude_control_enabled = false;
 
       front_left.writeMicroseconds(1000);
@@ -397,19 +432,20 @@ void loop()
       Particle.publish("got into safety thingy");
       delay(1000);
     }
-    
-    // Just a precaution on joystick input
-    // if (abs(pitch_reference) > 20.0f || abs(roll_reference > 20.0f)) {
-    //     pitch_reference = 0.0f;
-    //     roll_reference = 0.0f;  
-    // }   
-  
-    if(attitude_control_enabled){
+
+    if(attitude_control_enabled && converge_cnt == 0){
      
+      // MOTOR CONTROL
+
       pitch_error = pitch_reference - myIMU.pitch; 
       roll_error = roll_reference - myIMU.roll;
       yaw_error = yaw_reference - myIMU.yaw;
 
+      // ! WARNING !
+      // If you ever move the following two lines outside of 
+      // current 'if' clause (attitude_control_enabled),
+      // integral errors will quickly accumulate without being corrected
+      // ------------
       pitch_i_mem += I_pitch * pitch_error;
       roll_i_mem += I_roll * roll_error;
 
@@ -417,58 +453,52 @@ void loop()
       roll_error_derivative = (roll_error - prev_roll_error) / myIMU.deltat;
 
       prev_pitch_error = pitch_error;
-      prev_roll_error = roll_error;   
+      prev_roll_error = roll_error;
     
-      // Check if errors exceed dead zone and apply control
-      //if (abs(pitch_error) > 0.01f){
-        // Scaling error into [-1, 1] range assuming [-45, 45] deg attitude range
-        // Result = ((Input - InputLow) / (InputHigh - InputLow))
-        //    * (OutputHigh - OutputLow) + OutputLow;
+      // Calculate PID outputs
+      PID_pitch = P_pitch * pitch_error + D_pitch * pitch_error_derivative + pitch_i_mem;
+      pitch_control = (int) PID_pitch;
+      if (pitch_control > max_pid_output) pitch_control = max_pid_output;
+      else if (pitch_control < -max_pid_output) pitch_control = -max_pid_output;
 
-        //pitch_error = ((pitch_error + 45.0f) / (45.0f + 45.0f)) * (1.0f + 1.0f) - 1.0f;
-
-        // Calculate PID output
-        PID_pitch = P_pitch * pitch_error + D_pitch * pitch_error_derivative + pitch_i_mem;
-
-        pitch_control = (int) PID_pitch;
-        // Scale the final pitch_control signal into [-1000, 1000]
-        //pitch_control = (int) (((PID_pitch + 1.f) / (1.f + 1.f)) * (1000.f + 1000.f) - 1000.f);
-
-      // }
-      // else
-      //   { pitch_control = 0; } 
-
-      //if (abs(roll_error) > 0.01f){
-
-        //roll_error = ((roll_error + 45.0f) / (45.0f + 45.0f)) * (1.0f + 1.0f) - 1.0f;
-        PID_roll = P_roll * roll_error + D_roll * roll_error_derivative + roll_i_mem;
-        roll_control = (int) PID_roll;
-        //roll_control = (int) (((PID_roll + 1.f) / (1.f + 1.f)) * (1000.f + 1000.f) - 1000.f);
-
-      // }
-      // else{ roll_control = 0; }
+      PID_roll = P_roll * roll_error + D_roll * roll_error_derivative + roll_i_mem;
+      roll_control = (int) PID_roll;
+      if (roll_control > max_pid_output) roll_control = max_pid_output;
+      else if (roll_control < -max_pid_output) roll_control = -max_pid_output;
 
       yaw_i_mem += I_yaw * yaw_error;
       // I honestly don't know if there are any good practices as to where should I add saturation.
-      // I add it at the very end but should every PID branch have one?
-      // There is obviously one final clipping of control signal before sending it to the motor
+      // I add it at the very end obviously but should every PID branch have one?
+      // Pitch and roll have 400 for now, yaw has 50
       yaw_i_mem = max(-50, min(50, yaw_i_mem)); 
 
-      PID_yaw = P_yaw * yaw_error + yaw_i_mem;
+      PID_yaw = yaw_i_mem;
 
-      // Add the pitch_control and roll_control values to steady state throttle (u_0)
-      // and clip the final signal into [1080, 1400] (cause I'm scared of these motors)
-      front_left.writeMicroseconds(max(1080, min(u_0 + pitch_control - roll_control - PID_yaw, 1800)));
-      front_right.writeMicroseconds(max(1080, min(u_0 + pitch_control + roll_control + PID_yaw, 1800)));
-      rear_left.writeMicroseconds(max(1080, min(u_0 - pitch_control - roll_control + PID_yaw, 1800)));
-      rear_right.writeMicroseconds(max(1080, min(u_0 - pitch_control + roll_control - PID_yaw, 1800)));      
+      // Add everything together and clip the final signal
+      front_left.writeMicroseconds(max(1100, min(u_0 + pitch_control - roll_control - PID_yaw, 1900)));
+      front_right.writeMicroseconds(max(1100, min(u_0 + pitch_control + roll_control + PID_yaw, 1900)));
+      rear_left.writeMicroseconds(max(1100, min(u_0 - pitch_control - roll_control + PID_yaw, 1900)));
+      rear_right.writeMicroseconds(max(1100, min(u_0 - pitch_control + roll_control - PID_yaw, 1900)));      
 
     }
 
+    // Custom frequency to debug something etc.
+    // if (millis() - mytime >= 500){
+    //   Serial.println("Something got sent by UDP.");
+    //   Serial.print("Available bytes: "); Serial.println(Udp.available());
+    //   Serial.print("roll_reference: "); Serial.println(roll_reference, 3);
+    //   Serial.print("pitch_reference: "); Serial.println(pitch_reference, 3);
+    //   Serial.print("throttle_reference: "); Serial.println(throttle_reference, 3);
+    //   Serial.println("\n");
+    //   Serial.print("pitch_error: "); Serial.println(pitch_error, 3);
+    //   Serial.print(" roll_error: "); Serial.println(roll_error, 3);
+    //   mytime = millis();
+    // }
 
-    // Read TCP input or Serial print something independently of data rates
-    if (myIMU.delt_t >= 15)
-    {
+    // Read network packets independently of sensor data rates
+    if (myIMU.delt_t >= 10)
+    {          
+
       if (TCPcomms && client.connected()){
 
         // Check for 12 bytes (3 floats) from joystick input --
@@ -489,11 +519,6 @@ void loop()
           pitch_reference = newInput[1];
           throttle_reference = newInput[2];
 
-          // Serial.print("roll_reference: "); Serial.println(roll_reference, 3);
-          // Serial.print("pitch_reference: "); Serial.println(pitch_reference, 3);
-          // Serial.print("throttle_reference: "); Serial.println(throttle_reference, 3);
-          // Serial.print("Left in buffer: "); Serial.println(client.available());
-
           last_joystick_update = millis();      
 
         }
@@ -506,6 +531,7 @@ void loop()
           but in those 3 seconds the drone can easily crash...
           I don't know what would be a good safety mechanism that won't disconnect often.
           Is bluetooth more reliable in this regard? Radio?
+          Using UDP for now
           */
 
           // 3 seconds seemed like a good middle ground
@@ -521,6 +547,30 @@ void loop()
           // }
           
         }
+      }
+
+      if(UDPcomms && Udp.parsePacket() > 0){
+        
+        if(Udp.available() >= 12){
+          byte tempBuff[4];
+          float newInput[3];
+
+          for(int j = 0; j < 3; j++){
+            for(int i = 0; i < 4; i++)
+            {
+              tempBuff[i] = Udp.read();                     
+            }
+            newInput[j] = *((float*)(tempBuff));            
+          }
+
+          // Because UDP is not reliable, I think there is a need for some sanity check
+          if(newInput[0] > -10.f && newInput[0] < 10.f)
+            roll_reference = newInput[0];
+          if(newInput[1] > -10.f && newInput[1] < 10.f)
+            pitch_reference = newInput[1];
+          if(newInput[2] > -10.f && newInput[2] < 10.f)
+            throttle_reference = newInput[2];
+        }        
       }
 
       if(SerialDebug)
@@ -562,10 +612,10 @@ void loop()
       }
       
      
-      // Check clients are available if already not connected
+      // Check if TCP clients are available if already not connected
       if (TCPcomms && !client.connected())
       {
-        Serial.println("No TCP connection.");
+        //Serial.println("No TCP connection.");
 
         client = server.available();        
 
@@ -580,9 +630,9 @@ void loop()
 
 
     // With these settings the filter is updating at a ~145 Hz rate using the
-    // Madgwick scheme and >200 Hz using the Mahony scheme even though the
-    // display refreshes at only 2 Hz. The filter update rate is determined
-    // mostly by the mathematical steps in the respective algorithms, the
+    // Madgwick scheme and >200 Hz using the Mahony scheme. 
+    // The filter update rate is determined mostly
+    // by the mathematical steps in the respective algorithms, the
     // processor speed (8 MHz for the 3.3V Pro Mini), and the magnetometer ODR:
     // an ODR of 10 Hz for the magnetometer produce the above rates, maximum
     // magnetometer ODR of 100 Hz produces filter update rates of 36 - 145 and
@@ -610,15 +660,24 @@ void loop()
 // =================
 
 
-int set_pitch_gain(String command) {
+int set_P_gain(String command) {
 
     P_pitch = command.toFloat();
+    P_roll = P_pitch;
     return 1;
 }
 
-int set_roll_gain(String command) {
+int set_D_gain(String command) {
 
-    P_roll = command.toFloat();
+    D_pitch = command.toFloat();
+    D_roll = D_pitch;
+    return 1;
+}
+
+int set_I_gain(String command) {
+
+    I_pitch = command.toFloat();
+    I_roll = I_pitch;
     return 1;
 }
 
@@ -687,21 +746,21 @@ int motor_commands(String command) {
 int joystick_input(String command) {
 
   if (command=="Trim down") {
-    //pitch_trim += 5.f;
-    P_pitch += 0.25f;
-    P_roll = P_pitch;
+    pitch_trim += 2.f;
+    // D_pitch += 0.1f;
+    // D_roll = D_pitch;
   }
   else if (command=="Trim up"){
-    //pitch_trim -= 5.f;
-    P_pitch -= 0.25f;
-    P_roll = P_pitch;
+    pitch_trim -= 2.f;
+    // D_pitch -= 0.1f;
+    // D_roll = D_pitch;
   }
   else if (command=="Trim left"){
-    roll_trim += 5.f;
+    roll_trim += 2.f;
     //P_pitch -= 1.0f;  
   }
   else if (command=="Trim right"){
-    roll_trim -= 5.f;
+    roll_trim -= 2.f;
     //P_pitch += 1.0f;
   }
   else if (command=="Power down"){
@@ -714,7 +773,9 @@ int joystick_input(String command) {
     
   }
   else if (command=="Spin up"){
-    for (int i = 1000; i <= u_0; i += 5) {
+    digitalWrite(ledPin, HIGH);
+
+    for (int i = 1000; i <= u_0; i += 10) {
               
       front_left.writeMicroseconds(i);
       front_right.writeMicroseconds(i);
@@ -722,8 +783,10 @@ int joystick_input(String command) {
       rear_right.writeMicroseconds(i);
       
       delay(200);
-      last_joystick_update = millis();  // This is so that we won't disconnect on spin up
+      // This is so that we won't disconnect on spin up
+      last_joystick_update = millis();  
     }
+    converge_cnt = 1000;
   }
   else if (command=="Enable control"){
     yaw_reference = myIMU.yaw;
